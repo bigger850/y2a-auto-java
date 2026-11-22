@@ -65,3 +65,9 @@ desktop.ini
 *.rej
 tmp/
 _bootstrap*
+
+# Windows 保留设备名（避免误创建）
+CON
+PRN
+AUX
+NUL

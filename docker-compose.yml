@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: y2a-pg
+    environment:
+      POSTGRES_DB: y2a
+      POSTGRES_USER: y2a
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-y2a}
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U y2a -d y2a"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build: .
+    container_name: y2a-java
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/y2a
+      DB_USER: y2a
+      DB_PASSWORD: ${DB_PASSWORD:-y2a}
+      JWT_SECRET: ${JWT_SECRET:-y2a-local-dev-secret-change-me-in-production-32bytes}
+      ENGINE_BASE_URL: ${ENGINE_BASE_URL:-http://y2a-engine:8001}
+      ENGINE_CALLBACK_BASE_URL: http://server:8080
+      TZ: Asia/Shanghai
+    ports:
+      - "18080:8080"
+    volumes:
+      - ./storage:/app/storage
+
+  # 阶段 3 会替换为真正的 Python 处理引擎；当前是占位（让配置有完整拓扑）
+  # engine:
+  #   image: y2a-engine:local
+  #   ...
+
+  web:
+    image: nginx:alpine
+    container_name: y2a-web
+    depends_on:
+      - server
+    ports:
+      - "5173:80"
+    volumes:
+      - ./y2a-web/dist:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  pgdata:

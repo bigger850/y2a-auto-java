@@ -1,0 +1,85 @@
+spring:
+  application:
+    name: y2a-server
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/y2a}
+    username: ${DB_USER:y2a}
+    password: ${DB_PASSWORD:y2a}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    context-path: /
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: assign_id
+      table-underscore-naming: true
+
+security:
+  jwt:
+    secret: ${JWT_SECRET:y2a-local-dev-secret-change-me-in-production-32bytes}
+    expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+  password:
+    # 与 Python 版兼容：首次启动可用该密码登录，之后在设置页修改
+    initial: ${INITIAL_PASSWORD:admin}
+
+engine:
+  # Python 处理引擎地址（仅 Java 调用引擎用）
+  base-url: ${ENGINE_BASE_URL:http://localhost:8001}
+  # 引擎回调 Java 的地址（引擎长任务完成后回调）
+  callback-base-url: ${ENGINE_CALLBACK_BASE_URL:http://localhost:8080}
+  connect-timeout-ms: 5000
+  response-timeout-ms: 30000
+
+app:
+  storage:
+    downloads: ${DOWNLOADS_DIR:./storage/downloads}
+    cookies: ${COOKIES_DIR:./storage/cookies}
+    logs: ${LOGS_DIR:./storage/logs}
+    temp: ${TEMP_DIR:./storage/temp}
+
+# 外部工具（方案 A）：yt-dlp 与 ffmpeg 作为二进制由 ProcessBuilder 调用
+tools:
+  ytdlp: ${Y2A_YTDLP_PATH:yt-dlp}
+  ffmpeg: ${Y2A_FFMPEG_PATH:ffmpeg}
+  ffprobe: ${Y2A_FFPROBE_PATH:ffprobe}
+
+y2a:
+  playwright:
+    # 是否启用 Playwright（抖音扫码/发布）；无 Chromium 的环境可置 false
+    enabled: ${Y2A_PLAYWRIGHT_ENABLED:true}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.y2a: DEBUG

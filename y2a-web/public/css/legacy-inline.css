@@ -1,0 +1,331 @@
+/* 从原版 Flask 模板抽取的内联样式，1:1 复刻，勿随意修改 */
+
+
+/* ===== index.html <style>#1 ===== */
+.title-clamp-2 { -webkit-line-clamp: 2; line-clamp: 2; max-height: 2.8em; }
+    .col-narrow { width: 32px; }
+
+
+/* ===== tasks.html <style>#1 ===== */
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.upload-result-container {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    max-width: 180px;
+    overflow: hidden;
+}
+
+.error-message-badge {
+    max-width: 180px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+    display: inline-block;
+    text-align: left;
+}
+
+.error-message-trigger {
+    padding: 0.35em 0.65em;
+}
+
+.error-message-trigger:focus-visible {
+    outline: 2px solid rgba(13, 110, 253, 0.45);
+    outline-offset: 2px;
+}
+
+.task-error-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: #212529;
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 0.5rem;
+    padding: 1rem;
+}
+
+.tasks-table {
+    table-layout: fixed; /* 固定布局，避免内容撑破导致横向滚动 */
+    width: 100%;
+}
+
+.tasks-table td, .tasks-table th {
+    vertical-align: middle;
+    padding: 0.5rem;
+}
+
+/* ID列溢出防护，避免图标与标题列重叠 */
+.tasks-table tbody td:first-child .id-cell {
+    max-width: 100%;
+    overflow: hidden;
+}
+.tasks-table tbody td:first-child .id-cell .text-monospace {
+    display: inline-block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tasks-table tbody td:first-child .id-cell .copy-id-btn {
+    flex: 0 0 auto;
+}
+
+/* 统一列宽在全局样式中设置为百分比，避免像素宽度导致超出 */
+.tasks-table .col-status { text-align: center; }
+.tasks-table .col-time { text-align: center; }
+.tasks-table .col-platform { text-align: center; }
+.tasks-table .col-partition { text-align: center; }
+.tasks-table .col-actions { text-align: right; }
+
+.task-datetime {
+    cursor: help;
+    border-bottom: 1px dotted #6c757d;
+    display: inline-block;
+    white-space: nowrap;
+}
+
+.table-responsive {
+    overflow-x: auto;
+}
+
+/* 当屏幕较窄时允许表格收缩，避免出现底部横向滚动条 */
+.tasks-table.no-min-width { min-width: 0; }
+
+.tasks-table .text-monospace {
+    font-size: 0.875rem;
+}
+
+.tags-container {
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.tasks-table .badge {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tasks-table .col-result .badge {
+    max-width: 160px;
+}
+
+.tasks-table .btn-sm { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+
+/* 新增：标题多行省略显示（默认两行） */
+.title-clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    line-clamp: 2; /* 标准属性，兼容部分浏览器 */
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* 保守换行：三行省略，减少出现横向滚动条概率 */
+.title-clamp-3 {
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    max-height: 4.2em; /* 3行 * 1.4 行高，进一步限制高度，配合table-layout: fixed */
+    line-height: 1.4;
+}
+
+/* 更细的进度条以节省空间 */
+.progress.progress-thin { height: 4px; }
+.progress.progress-thin .progress-bar { background-color: #0d6efd; }
+
+/* 行状态轻微高亮 */
+tr.status-downloading td { background-color: rgba(13,110,253,0.03); }
+tr.status-uploading td { background-color: rgba(25,135,84,0.03); }
+tr.status-failed td { background-color: rgba(220,53,69,0.03); }
+tr.status-awaiting_manual_review td { background-color: rgba(255,193,7,0.05); }
+
+/* 去边框现代化风格 */
+.modern-list { border: none; box-shadow: none; }
+.modern-table table { border-collapse: separate; border-spacing: 0 4px; }
+.modern-table table tbody tr { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.modern-table table thead th { border-bottom: 1px solid #e9ecef; }
+.modern-table table tbody tr td { border-top: none; }
+.modern-table .table-hover tbody tr:hover { background: rgba(13,110,253,0.04); }
+.modern-table .table { background: transparent; }
+.table-borderless>:not(caption)>*>* { border-bottom-width: 0; }
+
+
+/* ===== manual_review.html <style>#1 ===== */
+.card-img-container {
+        height: 180px;
+        overflow: hidden;
+        position: relative;
+    }
+    
+    .card-img-container img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    
+    .moderation-item {
+        margin-bottom: 15px;
+    }
+    .moderation-item h6 {
+        margin-bottom: 0.5rem;
+    }
+    .list-group-item small {
+        font-size: 0.85em;
+        color: #555;
+    }
+    .text-monospace {
+        font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    
+    .tags-container {
+        display: flex;
+        flex-wrap: wrap;
+    }
+
+    /* 保留描述中的换行与空白 */
+    .desc-pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #fafafa;
+        border: 1px solid #eee;
+        border-radius: .25rem;
+        padding: .5rem .75rem;
+        max-height: 220px;
+        overflow-y: auto;
+    }
+
+
+/* ===== youtube_monitor.html <style>#1 ===== */
+.table th {
+    border-top: none;
+    font-weight: 600;
+}
+.badge {
+    font-size: 0.78em;
+}
+.text-truncate-300 {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+/* Consistent icon button size */
+.btn-icon {
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
+/* Responsive: convert table to stacked card/list on small screens */
+@media (max-width: 768px) {
+    .youtube-monitor-table thead,
+    .history-table thead {
+        display: none;
+    }
+    .youtube-monitor-table tbody tr,
+    .history-table tbody tr {
+        display: block;
+        margin-bottom: 0.7rem;
+        border: 1px solid rgba(0,0,0,0.06);
+        border-radius: .35rem;
+        padding: .35rem;
+        background: rgba(255,255,255,0.98);
+    }
+    /* Stack label above value for each cell to reduce horizontal clutter */
+    .youtube-monitor-table tbody td,
+    .history-table tbody td {
+        display: block;
+        padding: .45rem .65rem;
+        border-bottom: none;
+    }
+    .youtube-monitor-table tbody td:before,
+    .history-table tbody td:before {
+        content: attr(data-label);
+        display: block;
+        font-weight: 700;
+        color: #222;
+        margin-bottom: .25rem;
+        font-size: .92rem;
+    }
+    /* Ensure cell content flows vertically */
+    .youtube-monitor-table tbody td > *,
+    .history-table tbody td > * {
+        display: block;
+    }
+    .text-truncate-300 {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    /* Right align action buttons and keep them on a single line */
+    .youtube-monitor-table tbody td[data-label="操作"],
+    .history-table tbody td[data-label="操作"] {
+        text-align: right;
+        padding-right: .8rem;
+    }
+    /* Slightly smaller icon buttons on mobile */
+    .btn-icon {
+        width: 30px;
+        height: 30px;
+    }
+    /* Make name stand out but not too large */
+    .youtube-monitor-table tbody td[data-label="名称"] strong,
+    .history-table tbody td[data-label="配置名称"] {
+        font-size: 1rem;
+    }
+}
+
+
+/* ===== youtube_monitor_history.html <style>#1 ===== */
+.table th {
+    border-top: none;
+}
+.badge {
+    font-size: 0.75em;
+}
+.card-title {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+}
+.text-truncate-300 {
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.text-truncate-150 {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+
+/* ===== edit_task.html <style>#1 ===== */
+.moderation-item {
+        margin-bottom: 15px;
+    }
+    
+    pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        max-height: 300px;
+        overflow-y: auto;
+    }

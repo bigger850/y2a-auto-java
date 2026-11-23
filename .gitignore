@@ -25,8 +25,19 @@ logs/
 downloads/
 temp/
 cookies/
-config/
-db/
+
+# 运行时配置目录（必须锚定根目录，否则会误伤
+# src/main/java/.../common/config 与 domain/config）
+/config/
+
+# 运行时数据库目录（同理，不能匹配 src/main/resources/db/migration）
+/db/
+y2a-server/db/
+
+# Flyway 迁移脚本必须纳入版本控制
+!y2a-server/src/main/resources/db/
+!y2a-server/src/main/resources/db/migration/
+!y2a-server/src/main/resources/db/migration/*.sql
 
 # ===== 敏感文件 =====
 *.cookies

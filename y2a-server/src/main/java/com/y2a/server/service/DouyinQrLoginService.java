@@ -134,7 +134,8 @@ public class DouyinQrLoginService {
                         page.screenshot(new Page.ScreenshotOptions().setPath(qrPath));
                     }
                     s.qrImagePath = qrPath.toString();
-                    set(s, "waiting", "请用手机抖音 App 扫描二维码并在手机上确认登录");
+                    // ready = 图片已落盘，前端可以开始加载
+                    set(s, "ready", "请用手机抖音 App 扫描二维码并在手机上确认登录");
 
                     // 轮询登录结果（最长与 TTL 一致）
                     long deadline = System.currentTimeMillis() + s.ttlMs;

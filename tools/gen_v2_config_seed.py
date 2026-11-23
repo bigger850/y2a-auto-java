@@ -71,10 +71,24 @@ def pg_json(value) -> str:
     return "'" + json.dumps(value, ensure_ascii=False).replace("'", "''") + "'::jsonb"
 
 
+# Java 版有意偏离 Python 默认值的配置项。
+# AI 默认端点改为 DeepSeek（OpenAI 兼容协议），只需填 API Key 即可用。
+#
+# ⚠ 注意：V2__seed_config.sql 已在生产库应用，其 checksum 不可再变。
+# 本 OVERRIDES 仅用于「全新环境重建 V2」或生成参考快照；
+# 已有部署的默认值切换由 V4__ai_default_deepseek.sql 增量迁移完成。
+OVERRIDES = {
+    "OPENAI_BASE_URL": "https://api.deepseek.com",
+    "OPENAI_MODEL_NAME": "deepseek-chat",
+}
+
+
 def main():
     defaults = load_defaults()
+    defaults.update(OVERRIDES)
     print("-- Flyway V2: 从 Python DEFAULT_CONFIG 生成的默认配置种子（共 %d 项）" % len(defaults))
     print("-- 由 tools/gen_v2_config_seed.py 生成，请勿手工编辑")
+    print("-- 注意：AI 默认端点已按 Java 版需求覆盖为 DeepSeek（见 OVERRIDES）")
     print("INSERT INTO app_config (config_key, config_value, category) VALUES")
     rows = []
     for key in sorted(defaults):

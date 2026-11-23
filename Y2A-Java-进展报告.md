@@ -1,6 +1,6 @@
 # Y2A-Auto Java 重构 · 进展报告
 
-> **报告版本**：v1.2　**生成时间**：2026-11-23 09:35 (Asia/Shanghai)
+> **报告版本**：v1.3　**生成时间**：2026-11-23 09:40 (Asia/Shanghai)
 > **当前阶段**：Phase 4-AI 已完成（翻译/标签/分区），Phase 4-ASR 待启动
 > **更新方式**：本报告为基线快照，后续每次迭代后追加「变更记录」章节并更新各表状态
 
@@ -16,10 +16,11 @@
 | 前端代码行数 | **1,743 行** |
 | REST 端点 | **54 个** |
 | 数据库表 | **13 张**（tasks / app_config / 5 监控 / outbox / flyway 等） |
-| 迁移脚本 | **3 个**（V1 init / V2 seed / V3 monitor），全部成功应用 |
+| 迁移脚本 | **4 个**（V1 init / V2 seed / V3 monitor / V4 AI默认），全部成功应用 |
 | 配置项 | **208 项**（从 Python 权威源自动生成） |
 | 单元测试 | **3 个测试类 / 17 个用例**（状态机 4 + 文本清洗 12 + 集成冒烟 1） |
 | 内置分区数据 | AcFun **60 个** / bilibili **141 个** |
+| AI 默认端点 | **DeepSeek**（`api.deepseek.com` / `deepseek-chat`） |
 | 外部工具 | yt-dlp 2026.10.26 ✅ / ffmpeg 8.0.1 ✅ / Chromium 1148 ✅ |
 | 容器 | y2a-java / y2a-pg / y2a-web 三容器运行中 |
 
@@ -205,6 +206,7 @@
 | --- | --- | --- |
 | 2026-11-22 | v1.0 | 基线报告：Phase 0-3 完成（骨架/CRUD/流水线/三平台上传/扫码） |
 | 2026-11-22 | v1.1 | **补齐 bilibili 扫码登录**：新增 `BilibiliQrLoginService`（纯 HTTP 协议 + ZXing 二维码渲染），三平台扫码覆盖率达 3/3。新增 ZXing 3.5.3 依赖。实测出码 15812 字符 base64 PNG，三态码轮询正常。影响：2.4 节扫码表、未完成清单移除第 4 项 |
+| 2026-11-23 | v1.3 | **AI 默认端点切换为 DeepSeek**：新增 V4 迁移（仅在当前值仍为旧 OpenAI 默认时才替换，不覆盖用户自定义）；`AiClient` 默认值改为 `https://api.deepseek.com` + `deepseek-chat`；生成脚本加 OVERRIDES；设置页 AI 字段补 DeepSeek 提示。验证：V4 迁移成功应用，`/api/ai/status` 返回 DeepSeek 端点 |
 | 2026-11-23 | v1.2 | **AI 阶段完成**：新增 `ai` 包 6 个类（AiClient / TextSanitizer / PromptTemplates / MetadataTranslator / TagGenerator / PartitionRecommender）。提示词 1:1 搬运原版（翻译/标签/分区），输出校验四道关（空/导流/过于相似/非自然简介），JSON 模式带降级协商。内置 AcFun 60 + bilibili 141 分区数据。接入 `TaskOrchestrator` 流水线（下载后 → 翻译 → 标签 → 分区 → 转码前）。新增 `/api/ai/{status,test,preview-tags}` 端点 + 设置页「测试 AI 连接」按钮。单测 12/12 通过。代码规模 68→76 文件、6,546→8,358 行、51→54 端点。**待办：需 API Key 实测真实质量** |
 
 <!-- 后续迭代在此追加，格式：

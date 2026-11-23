@@ -3,56 +3,57 @@ package com.y2a.server.uploader;
 import com.y2a.server.common.constant.UploadTarget;
 import com.y2a.server.domain.task.Task;
 import com.y2a.server.repository.TaskRepository;
-import com.y2a.server.service.ConfigService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
- * 上传分发器（策略模式）。
+ * 上传分发器（策略模式 + 注册表）。
  *
- * <p>按任务的 upload_target 选择上传器；both 时串行执行 AcFun → bilibili。
- * 每个平台成功后立即把结果写回任务字段，保证幂等与断点续跑。</p>
+ * <p>本类只做三件事：按 {@link UploadTarget} 取出策略、串行执行、
+ * 把成功结果写回任务。**不含任何平台特有逻辑**——新增平台只需实现
+ * {@link PlatformUploader} 并标注 {@code @Component}，Spring 会自动注入。</p>
  */
 @Component
 public class UploadDispatcher {
 
     private static final Logger log = LoggerFactory.getLogger(UploadDispatcher.class);
 
-    private final AcfunUploader acfun;
-    private final com.y2a.server.uploader.bili.BilibiliUploader bilibili;
-    private final DouyinPublisher douyin;
+    private final Map<UploadTarget, PlatformUploader> strategies;
+    private final UploadContextFactory contextFactory;
     private final TaskRepository taskRepository;
-    private final ConfigService configService;
 
-    @Value("${app.storage.cookies:./storage/cookies}")
-    private String cookiesDir;
-
-    public UploadDispatcher(AcfunUploader acfun,
-                            com.y2a.server.uploader.bili.BilibiliUploader bilibili,
-                            DouyinPublisher douyin,
-                            TaskRepository taskRepository, ConfigService configService) {
-        this.acfun = acfun;
-        this.bilibili = bilibili;
-        this.douyin = douyin;
+    public UploadDispatcher(List<PlatformUploader> uploaders,
+                            UploadContextFactory contextFactory,
+                            TaskRepository taskRepository) {
+        // 注册表：平台 → 策略。重复定义会在启动时暴露，而非运行时静默覆盖
+        this.strategies = uploaders.stream().collect(Collectors.toMap(
+                PlatformUploader::platform,
+                Function.identity(),
+                (a, b) -> {
+                    throw new IllegalStateException("平台上传器重复注册: " + a.platform());
+                },
+                () -> new EnumMap<>(UploadTarget.class)));
+        this.contextFactory = contextFactory;
         this.taskRepository = taskRepository;
-        this.configService = configService;
+        log.info("已注册上传策略: {}", strategies.keySet());
     }
 
     /** 上传结果汇总。 */
-    public record UploadOutcome(boolean success, String message, Map<String, Object> detail) {}
+    public record UploadOutcome(boolean success, String message, Map<String, Object> detail) {
+    }
 
     /**
-     * 执行上传（按目标平台分发）。
+     * 执行上传：按任务的 upload_target 展开平台列表，逐个执行。
+     * 每个平台成功后立即写库（幂等），失败则中断并返回已完成的汇总。
      */
     public UploadOutcome upload(Task task, Consumer<Double> progress,
                                 Consumer<String> logger, AtomicBoolean cancelFlag) {
@@ -60,143 +61,47 @@ public class UploadDispatcher {
         List<UploadTarget> platforms = target.platforms();
 
         StringBuilder summary = new StringBuilder();
+        Task current = task;
+
         for (UploadTarget platform : platforms) {
-            if (alreadyUploaded(task, platform)) {
-                summary.append(platform.label()).append(":已有结果; ");
-                continue;
-            }
-            UploadOutcome outcome = switch (platform) {
-                case ACFUN -> uploadAcfun(task, progress, logger, cancelFlag);
-                case BILIBILI -> uploadBilibili(task, progress, logger, cancelFlag);
-                case DOUYIN -> uploadDouyin(task, progress, logger, cancelFlag);
-                default -> new UploadOutcome(false, "未知平台", Map.of());
-            };
-            summary.append(platform.label()).append(": ")
-                    .append(outcome.success() ? "成功" : outcome.message()).append("; ");
-            if (!outcome.success()) {
+            PlatformUploader strategy = strategies.get(platform);
+            if (strategy == null) {
+                summary.append(platform.label()).append(": 未实现; ");
                 return new UploadOutcome(false, summary.toString(), Map.of());
             }
-            task = taskRepository.selectById(task.getId()); // 取回最新（含刚写入的响应）
+            if (strategy.alreadyUploaded(current)) {
+                summary.append(platform.label()).append(": 已有结果; ");
+                continue;
+            }
+
+            var ctx = contextFactory.build(current, platform.value(), progress, logger, cancelFlag);
+            PlatformUploader.UploadResult result;
+            try {
+                result = strategy.upload(ctx);
+            } catch (Exception e) {
+                log.error("[{}] 上传异常", platform.label(), e);
+                summary.append(platform.label()).append(": 异常 ").append(e.getMessage()).append("; ");
+                return new UploadOutcome(false, summary.toString(), Map.of());
+            }
+
+            summary.append(platform.label()).append(": ")
+                    .append(result.success() ? "成功" : result.message()).append("; ");
+
+            if (!result.success()) {
+                return new UploadOutcome(false, summary.toString(), Map.of());
+            }
+
+            // 成功：写回响应字段，再取最新实体供下一个平台使用
+            Task fresh = taskRepository.selectById(current.getId());
+            strategy.applyResponse(fresh, result.response());
+            taskRepository.updateById(fresh);
+            current = fresh;
         }
         return new UploadOutcome(true, summary.toString(), Map.of());
     }
 
-    private UploadOutcome uploadAcfun(Task task, Consumer<Double> progress,
-                                      Consumer<String> logger, AtomicBoolean cancelFlag) {
-        Path video = pathOf(task.getVideoPathLocal());
-        if (video == null) {
-            return new UploadOutcome(false, "视频文件不存在", Map.of());
-        }
-        Path cover = pathOf(task.getCoverPathLocal());
-        Path cookieFile = Paths.get(cookiesDir).resolve("ac_cookies.json");
-
-        String partition = configService.getString("FIXED_PARTITION_ID", "");
-        if (partition == null || partition.isBlank()) {
-            partition = task.getSelectedPartitionId() != null
-                    ? task.getSelectedPartitionId() : "1";
-        }
-
-        var result = acfun.upload(video, cover,
-                task.displayTitle(), task.getDescriptionTranslated(),
-                task.getTagsGenerated(), partition, cookieFile,
-                progress, logger, cancelFlag);
-
-        if (!result.success()) {
-            return new UploadOutcome(false, result.error(), Map.of());
-        }
-        Task fresh = taskRepository.selectById(task.getId());
-        fresh.setAcfunUploadResponse(Map.of(
-                "ac_number", result.acNumber(),
-                "title", task.displayTitle() == null ? "" : task.displayTitle(),
-                "cover_url", result.coverUrl() == null ? "" : result.coverUrl(),
-                "url", "https://www.acfun.cn/v/ac" + result.acNumber()));
-        taskRepository.updateById(fresh);
-        return new UploadOutcome(true, "AcFun 投稿成功 AC" + result.acNumber(), Map.of());
-    }
-
-    private UploadOutcome uploadBilibili(Task task, Consumer<Double> progress,
-                                         Consumer<String> logger, AtomicBoolean cancelFlag) {
-        Path video = pathOf(task.getVideoPathLocal());
-        if (video == null) {
-            return new UploadOutcome(false, "视频文件不存在", Map.of());
-        }
-        Path cover = pathOf(task.getCoverPathLocal());
-        Path cookieFile = Paths.get(cookiesDir).resolve("bili_cookies.json");
-
-        String tid = configService.getString("FIXED_PARTITION_ID_BILIBILI", "");
-        if (tid == null || tid.isBlank()) {
-            tid = task.getSelectedPartitionId() != null ? task.getSelectedPartitionId() : "21";
-        }
-
-        var result = bilibili.upload(video, cover,
-                task.displayTitle(), task.getDescriptionTranslated(),
-                task.getTagsGenerated(), tid, cookieFile,
-                progress, logger, cancelFlag);
-
-        if (!result.success()) {
-            return new UploadOutcome(false, result.error(), Map.of());
-        }
-        Task fresh = taskRepository.selectById(task.getId());
-        fresh.setBilibiliUploadResponse(Map.of(
-                "bvid", result.bvid() == null ? "" : result.bvid(),
-                "aid", result.aid() == null ? "" : result.aid(),
-                "title", task.displayTitle() == null ? "" : task.displayTitle(),
-                "url", "https://www.bilibili.com/video/" + (result.bvid() == null ? "" : result.bvid())));
-        taskRepository.updateById(fresh);
-        return new UploadOutcome(true, "bilibili 投稿成功 " + result.bvid(), Map.of());
-    }
-
-    private UploadOutcome uploadDouyin(Task task, Consumer<Double> progress,
-                                       Consumer<String> logger, AtomicBoolean cancelFlag) {
-        Path video = pathOf(task.getVideoPathLocal());
-        if (video == null) {
-            return new UploadOutcome(false, "视频文件不存在", Map.of());
-        }
-        Path cover = pathOf(task.getCoverPathLocal());
-        Path cookieFile = Paths.get(cookiesDir).resolve("douyin_cookies.json");
-        Path shots = Paths.get(cookiesDir).getParent() == null
-                ? Paths.get("logs/douyin") : Paths.get(cookiesDir).getParent().resolve("logs/douyin");
-
-        boolean headless = boolConfig("DOUYIN_HEADLESS", true);
-        boolean draftOnly = boolConfig("DOUYIN_SAVE_DRAFT_ONLY", false);
-
-        var result = douyin.publish(video, cover, task.displayTitle(), task.getTagsGenerated(),
-                cookieFile, headless, draftOnly, shots, progress, logger, cancelFlag);
-
-        if (!result.success()) {
-            return new UploadOutcome(false, result.error(), Map.of());
-        }
-        Task fresh = taskRepository.selectById(task.getId());
-        Map<String, Object> resp = new java.util.LinkedHashMap<>();
-        resp.put("platform", "douyin");
-        resp.put("item_id", result.itemId() == null ? "" : result.itemId());
-        resp.put("title", task.displayTitle() == null ? "" : task.displayTitle());
-        resp.put("url", result.url() == null ? "" : result.url());
-        resp.put("message", "抖音发布成功");
-        fresh.setDouyinUploadResponse(resp);
-        taskRepository.updateById(fresh);
-        return new UploadOutcome(true, "抖音发布成功", Map.of());
-    }
-
-    private boolean boolConfig(String key, boolean def) {
-        Object v = configService.get(key, def);
-        if (v instanceof Boolean b) return b;
-        return v != null && List.of("true", "1", "on", "yes")
-                .contains(String.valueOf(v).toLowerCase());
-    }
-
-    private boolean alreadyUploaded(Task task, UploadTarget platform) {
-        return switch (platform) {
-            case ACFUN -> task.getAcfunUploadResponse() != null && !task.getAcfunUploadResponse().isEmpty();
-            case BILIBILI -> task.getBilibiliUploadResponse() != null && !task.getBilibiliUploadResponse().isEmpty();
-            case DOUYIN -> task.getDouyinUploadResponse() != null && !task.getDouyinUploadResponse().isEmpty();
-            default -> false;
-        };
-    }
-
-    private static Path pathOf(String p) {
-        if (p == null || p.isBlank()) return null;
-        Path path = Paths.get(p);
-        return Files.isRegularFile(path) ? path : null;
+    /** 已注册的平台（供健康检查/诊断）。 */
+    public java.util.Set<UploadTarget> registeredPlatforms() {
+        return strategies.keySet();
     }
 }

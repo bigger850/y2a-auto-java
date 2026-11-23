@@ -31,15 +31,18 @@ public class QrLoginController {
     private final DouyinQrLoginService douyinQrLogin;
     private final com.y2a.server.service.AcfunQrLoginService acfunQrLogin;
     private final com.y2a.server.service.BilibiliQrLoginService bilibiliQrLogin;
+    private final com.y2a.server.service.ResourceTicketService ticketService;
 
     public QrLoginController(QrSessionService qrSessionService,
                              DouyinQrLoginService douyinQrLogin,
                              com.y2a.server.service.AcfunQrLoginService acfunQrLogin,
-                             com.y2a.server.service.BilibiliQrLoginService bilibiliQrLogin) {
+                             com.y2a.server.service.BilibiliQrLoginService bilibiliQrLogin,
+                             com.y2a.server.service.ResourceTicketService ticketService) {
         this.qrSessionService = qrSessionService;
         this.douyinQrLogin = douyinQrLogin;
         this.acfunQrLogin = acfunQrLogin;
         this.bilibiliQrLogin = bilibiliQrLogin;
+        this.ticketService = ticketService;
     }
 
     @PostMapping("/{platform}/qrcode/start")
@@ -52,9 +55,13 @@ public class QrLoginController {
                         "抖音扫码不可用：当前环境缺少 Playwright Chromium，请改用手动导入登录态文件");
             }
             QrSessionService.QrSession session = douyinQrLogin.start(platform);
+            String ticket = ticketService.issue(session.id, "qr-image");
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("session_id", session.id);
             data.put("expires_in", session.ttlMs / 1000);
+            // 前端 <img src> 无法携带 Authorization 头，用一次性 ticket 代替
+            data.put("image_url",
+                    "/api/settings/douyin/qrcode/image/" + session.id + "?ticket=" + ticket);
             data.put("message", "正在生成二维码，请稍候...");
             return ApiResponse.ok(data);
         }
@@ -136,6 +143,8 @@ public class QrLoginController {
         data.put("success", !"failed".equals(s.status));
         data.put("status", normalizeStatus(s.status));
         data.put("message", s.message);
+        // 抖音：截图是否已落盘，前端据此决定何时设置 <img src>
+        data.put("image_ready", s.qrImagePath != null && !"waiting".equals(s.status));
         if ("success".equals(s.status)) {
             data.put("cookies_saved", true);
         }
@@ -145,9 +154,19 @@ public class QrLoginController {
         return ApiResponse.ok(data);
     }
 
-    /** 抖音二维码图片（Playwright 截图落盘后由此回源）。 */
+    /**
+     * 抖音二维码图片。
+     *
+     * <p>浏览器对 &lt;img src&gt; 不会附带 Authorization 头，因此本端点不走 JWT，
+     * 改用 {@code ?ticket=xxx} 的一次性票据（由 start 接口签发，与 sessionId 绑定）。</p>
+     */
     @GetMapping("/douyin/qrcode/image/{sessionId}")
-    public ResponseEntity<ByteArrayResource> douyinImage(@PathVariable String sessionId) {
+    public ResponseEntity<ByteArrayResource> douyinImage(
+            @PathVariable String sessionId,
+            @RequestParam(value = "ticket", required = false) String ticket) {
+        if (!ticketService.validate(ticket, sessionId)) {
+            return ResponseEntity.status(401).build();
+        }
         QrSessionService.QrSession s = qrSessionService.get(sessionId);
         if (s == null || s.qrImagePath == null) {
             return ResponseEntity.notFound().build();
@@ -167,10 +186,10 @@ public class QrLoginController {
         }
     }
 
-    /** 前端状态映射：waiting → pending（继续轮询），success/expired → 终态。 */
+    /** 前端状态映射：waiting/ready → pending（继续轮询），success/expired → 终态。 */
     private static String normalizeStatus(String raw) {
         return switch (raw == null ? "" : raw) {
-            case "waiting", "wait_scan", "scan", "confirm" -> "pending";
+            case "waiting", "ready", "wait_scan", "scan", "confirm" -> "pending";
             case "success" -> "done";
             case "expired" -> "timeout";
             case "failed" -> "failed";

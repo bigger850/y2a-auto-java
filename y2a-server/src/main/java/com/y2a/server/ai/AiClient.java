@@ -36,6 +36,11 @@ public class AiClient {
 
     private static final Logger log = LoggerFactory.getLogger(AiClient.class);
 
+    /** 默认端点：DeepSeek（OpenAI 兼容）。 */
+    public static final String DEFAULT_BASE_URL = "https://api.deepseek.com";
+    /** 默认模型：DeepSeek 通用对话模型。 */
+    public static final String DEFAULT_MODEL = "deepseek-chat";
+
     private final ConfigService configService;
     private final ObjectMapper mapper = new ObjectMapper();
     private final HttpClient http;
@@ -62,12 +67,12 @@ public class AiClient {
         }
     }
 
-    /** 读取全局 AI 配置。 */
+    /** 读取全局 AI 配置。默认使用 DeepSeek（OpenAI 兼容）。 */
     public AiConfig globalConfig() {
         return new AiConfig(
                 configService.getString("OPENAI_API_KEY", ""),
-                configService.getString("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                configService.getString("OPENAI_MODEL_NAME", "gpt-3.5-turbo"),
+                configService.getString("OPENAI_BASE_URL", DEFAULT_BASE_URL),
+                configService.getString("OPENAI_MODEL_NAME", DEFAULT_MODEL),
                 boolConfig("OPENAI_THINKING_ENABLED", false),
                 configService.getString("OPENAI_REASONING_EFFORT", "auto"),
                 intConfig("OPENAI_TIMEOUT_SECONDS", 120)

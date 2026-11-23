@@ -83,10 +83,10 @@ const TABS: TabDef[] = [
     ]},
   ]},
   { id: 'vtab-ai', icon: 'bi-robot', label: 'AI 服务与端点', sections: [
-    { title: '全局模型', fields: [
-      { key: 'OPENAI_BASE_URL', label: 'API 根地址' },
-      { key: 'OPENAI_API_KEY', label: 'API Key', type: 'password' },
-      { key: 'OPENAI_MODEL_NAME', label: '模型名称' },
+    { title: '全局模型', lead: '默认使用 DeepSeek（OpenAI 兼容协议），填入 API Key 即可使用。', fields: [
+      { key: 'OPENAI_BASE_URL', label: 'API 根地址', hint: '默认 https://api.deepseek.com' },
+      { key: 'OPENAI_API_KEY', label: 'API Key', type: 'password', hint: '在 platform.deepseek.com 申请' },
+      { key: 'OPENAI_MODEL_NAME', label: '模型名称', hint: '默认 deepseek-chat' },
       { key: 'OPENAI_THINKING_ENABLED', label: '允许模型思考', type: 'checkbox' },
       { key: 'OPENAI_REASONING_EFFORT', label: '思考力度', type: 'select', options: [['auto','auto（模型默认）'],['minimal','minimal'],['low','low'],['medium','medium'],['high','high'],['xhigh','xhigh']] },
       { key: 'OPENAI_TIMEOUT_SECONDS', label: '超时（秒）', type: 'number' },
@@ -271,35 +271,50 @@ async function uploadCookie(fieldKey: string, ev: Event) {
 }
 
 // ---------------- 扫码登录 ----------------
-const qrPanel = reactive<Record<string, { sessionId: string; status: string; imageSrc?: string; timer?: number }>>({})
+const qrPanel = reactive<Record<string, {
+  sessionId: string; status: string; imageSrc?: string; imageUrl?: string; timer?: number
+}>>({})
 
 async function startQr(platform: string) {
   try {
-    const data = await request<{ session_id: string; image_base64?: string; mime_type?: string; message?: string }>({
+    const data = await request<{
+      session_id: string; image_base64?: string; mime_type?: string; image_url?: string; message?: string
+    }>({
       method: 'POST', url: `/settings/${platform}/qrcode/start`,
     })
-    const panel: { sessionId: string; status: string; imageSrc?: string; timer?: number } = {
+    const panel: {
+      sessionId: string; status: string; imageSrc?: string; imageUrl?: string; timer?: number
+    } = {
       sessionId: data.session_id,
       status: data.message || '等待扫码...',
     }
     if (data.image_base64) {
+      // AcFun / bilibili：后端直接返回 base64，立即可用
       panel.imageSrc = `data:${data.mime_type || 'image/png'};base64,${data.image_base64}`
-    } else if (platform === 'douyin') {
-      panel.imageSrc = `/api/settings/douyin/qrcode/image/${data.session_id}?t=${Date.now()}`
+    } else if (data.image_url) {
+      // 抖音：截图需要 20~30s 生成，先存 URL，等轮询到 image_ready 再设置 src
+      panel.imageUrl = data.image_url
     }
     qrPanel[platform] = panel
     if (qrPanel[platform].timer) clearInterval(qrPanel[platform].timer)
     qrPanel[platform].timer = window.setInterval(() => pollQr(platform), 2000)
   } catch (e: any) { toast.value = e?.message || '获取二维码失败' }
 }
+
 async function pollQr(platform: string) {
   const panel = qrPanel[platform]
   if (!panel?.sessionId) return
   try {
-    const data = await request<{ status: string; message: string }>({
+    const data = await request<{
+      status: string; message: string; image_ready?: boolean
+    }>({
       method: 'GET', url: `/settings/${platform}/qrcode/status/${panel.sessionId}`,
     })
     panel.status = data.message || data.status
+    // 截图就绪后才设置图片源，避免 404
+    if (data.image_ready && panel.imageUrl && !panel.imageSrc) {
+      panel.imageSrc = panel.imageUrl
+    }
     if (['done', 'failed', 'timeout'].includes(data.status)) {
       clearInterval(panel.timer)
       toast.value = data.message
@@ -433,7 +448,9 @@ const filteredTabs = computed(() => {
                             <span class="help-text">登录态通常 1~2 周过期，过期后重新扫码即可。</span>
                           </div>
                           <div v-if="qrPanel[p.id]" class="settings-qrcode-panel mt-2">
-                            <img v-if="qrPanel[p.id].imageSrc" :src="qrPanel[p.id].imageSrc" alt="登录二维码" class="qrcode-img" />
+                            <img v-if="qrPanel[p.id].imageSrc" :src="qrPanel[p.id].imageSrc"
+                                 alt="登录二维码" class="qrcode-img"
+                                 @error="qrPanel[p.id].imageSrc = undefined" />
                             <div class="mt-2"><span class="text-muted">{{ qrPanel[p.id].status }}</span></div>
                           </div>
                         </div>
@@ -451,7 +468,7 @@ const filteredTabs = computed(() => {
                       <button type="button" class="btn btn-outline-primary" :disabled="aiTesting" @click="testAi">
                         <i class="bi bi-lightning-charge"></i> {{ aiTesting ? '测试中...' : '测试 AI 连接' }}
                       </button>
-                      <span class="help-text">使用「全局模型」中的配置发起一次对话请求。</span>
+                      <span class="help-text">使用「全局模型」中的配置发起一次对话请求（默认 DeepSeek）。</span>
                     </div>
                     <div v-if="aiTestResult" class="mt-2">
                       <span :class="aiTestResult.startsWith('✓') ? 'text-success' : 'text-danger'">{{ aiTestResult }}</span>

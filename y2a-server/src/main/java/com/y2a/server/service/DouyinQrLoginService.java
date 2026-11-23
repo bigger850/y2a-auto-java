@@ -27,6 +27,8 @@ public class DouyinQrLoginService {
 
     private static final String UPLOAD_URL = "https://creator.douyin.com/creator-micro/content/upload";
     private static final String CREATOR_HOST = "creator.douyin.com";
+    /** 等待二维码渲染的最长时间（抖音登录弹窗 + 二维码图生成）。 */
+    private static final long QR_WAIT_TIMEOUT_MS = 60_000L;
 
     private final QrSessionService qrSessions;
     private final boolean enabled;
@@ -115,23 +117,36 @@ public class DouyinQrLoginService {
                         }
                     }
 
-                    // 截取二维码：优先二维码容器，否则整页（前端可展示整页截图）
-                    boolean captured = false;
-                    for (String sel : new String[]{
-                            "div[class*='qrcode']", "canvas", ".qrcode",
-                            "[class*='scan'] img", "img[src*='qrcode']"}) {
-                        try {
-                            Locator node = page.locator(sel).first();
-                            if (node.count() > 0 && node.isVisible()) {
-                                node.screenshot(new Locator.ScreenshotOptions().setPath(qrPath));
-                                captured = true;
-                                break;
+                    // 等待二维码真正渲染：抖音把二维码画成 178px 左右的 data-url PNG。
+                    // 不能用 class 名定位（抖音的 class 是构建哈希，会随版本变化）。
+                    Locator qrImage = waitForQrImage(page);
+                    if (qrImage == null) {
+                        // 兜底：截取登录卡片区域（比整页更聚焦），仍找不到则整页
+                        boolean captured = false;
+                        for (String sel : new String[]{
+                                "[class*='login-card']",
+                                "[class*='login'] [class*='card']"}) {
+                            try {
+                                Locator node = page.locator(sel).first();
+                                if (node.count() > 0 && node.isVisible()) {
+                                    node.screenshot(new Locator.ScreenshotOptions().setPath(qrPath));
+                                    captured = true;
+                                    break;
+                                }
+                            } catch (Exception ignored) {
                             }
+                        }
+                        if (!captured) {
+                            page.screenshot(new Page.ScreenshotOptions().setPath(qrPath));
+                        }
+                    } else {
+                        // 截图前先滚动到可见位置，避免截到遮挡/错位区域
+                        try {
+                            qrImage.scrollIntoViewIfNeeded();
+                            page.waitForTimeout(300);
                         } catch (Exception ignored) {
                         }
-                    }
-                    if (!captured) {
-                        page.screenshot(new Page.ScreenshotOptions().setPath(qrPath));
+                        qrImage.screenshot(new Locator.ScreenshotOptions().setPath(qrPath));
                     }
                     s.qrImagePath = qrPath.toString();
                     // ready = 图片已落盘，前端可以开始加载
@@ -181,6 +196,62 @@ public class DouyinQrLoginService {
     private static void set(QrSessionService.QrSession s, String status, String message) {
         s.status = status;
         s.message = message;
+    }
+
+    /**
+     * 等待二维码图片渲染完成。
+     *
+     * <p>抖音登录页把二维码绘制成一张 base64 data-url 的 PNG，尺寸约 178×178。
+     * 不能用 class 名定位（class 是构建哈希，随版本变化），因此按以下条件筛选：</p>
+     * <ul>
+     *   <li>data-url PNG 且可见</li>
+     *   <li>接近方形、边长 100~300</li>
+     *   <li><b>完整位于视口内</b>（页面里存在同尺寸但被滚出视口的元素，必须排除）</li>
+     * </ul>
+     *
+     * @return 找到则返回该 Locator，超时返回 null
+     */
+    private Locator waitForQrImage(Page page) {
+        long deadline = System.currentTimeMillis() + QR_WAIT_TIMEOUT_MS;
+        int viewportHeight = 900;
+        try {
+            Object vh = page.evaluate("() => window.innerHeight");
+            if (vh instanceof Number n) viewportHeight = n.intValue();
+        } catch (Exception ignored) {
+        }
+
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Locator candidates = page.locator("img[src^='data:image/png']");
+                int count = candidates.count();
+                Locator best = null;
+                double bestArea = 0;
+                for (int i = 0; i < count; i++) {
+                    Locator node = candidates.nth(i);
+                    if (!node.isVisible()) continue;
+                    var box = node.boundingBox();
+                    if (box == null) continue;
+                    double w = box.width;
+                    double h = box.height;
+                    // 接近方形、边长 100~300
+                    if (w < 100 || h < 100 || w > 300 || h > 300) continue;
+                    if (Math.abs(w - h) > 20) continue;
+                    // 必须在视口内：负坐标或超出视口的是被滚出屏幕的同尺寸元素
+                    if (box.y < 0 || box.x < 0) continue;
+                    if (box.y + h > viewportHeight) continue;
+                    if (w * h > bestArea) {
+                        bestArea = w * h;
+                        best = node;
+                    }
+                }
+                if (best != null) {
+                    return best;
+                }
+            } catch (Exception ignored) {
+            }
+            page.waitForTimeout(1000);
+        }
+        return null;
     }
 
     private static String safeText(Page page) {

@@ -1,7 +1,7 @@
 # Y2A-Auto Java 重构 · 进展报告
 
-> **报告版本**：v1.0　**生成时间**：2026-11-22 22:45 (Asia/Shanghai)
-> **当前阶段**：Phase 3 已完成（下载/转码/上传/扫码），Phase 4 待启动（AI + ASR）
+> **报告版本**：v1.2　**生成时间**：2026-11-23 09:35 (Asia/Shanghai)
+> **当前阶段**：Phase 4-AI 已完成（翻译/标签/分区），Phase 4-ASR 待启动
 > **更新方式**：本报告为基线快照，后续每次迭代后追加「变更记录」章节并更新各表状态
 
 ---
@@ -10,14 +10,16 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| Java 源文件 | **68 个** |
-| Java 代码行数 | **6,546 行** |
+| Java 源文件 | **76 个** |
+| Java 代码行数 | **8,358 行** |
 | 前端 Vue 组件 | **9 个** |
 | 前端代码行数 | **1,743 行** |
-| REST 端点 | **51 个** |
+| REST 端点 | **54 个** |
 | 数据库表 | **13 张**（tasks / app_config / 5 监控 / outbox / flyway 等） |
 | 迁移脚本 | **3 个**（V1 init / V2 seed / V3 monitor），全部成功应用 |
 | 配置项 | **208 项**（从 Python 权威源自动生成） |
+| 单元测试 | **3 个测试类 / 17 个用例**（状态机 4 + 文本清洗 12 + 集成冒烟 1） |
+| 内置分区数据 | AcFun **60 个** / bilibili **141 个** |
 | 外部工具 | yt-dlp 2026.10.26 ✅ / ffmpeg 8.0.1 ✅ / Chromium 1148 ✅ |
 | 容器 | y2a-java / y2a-pg / y2a-web 三容器运行中 |
 
@@ -46,10 +48,37 @@
 | --- | --- | --- | --- |
 | fetch_info（元信息） | ✅ | yt-dlp `--dump-single-json` | 「Me at the zoo」标题抓取成功 |
 | download_video | ✅ | yt-dlp + 进度解析 | 视频465K + 封面24K + 元数据77K 全部落地 |
+| **AI 翻译（标题/简介）** | ✅ | OpenAI 兼容 + 校验重试 | 单测 12/12；需 API Key 实测 |
+| **AI 标签生成** | ✅ | JSON 模式 + 预设去重 | 单测通过；需 API Key 实测 |
+| **AI 分区推荐** | ✅ | 本地分区树 + ID 白名单 | AcFun 60 / bilibili 141 分区已加载 |
 | translate_subtitle（下载字幕） | 🟡 | yt-dlp `--write-subs` | 代码就绪，需有字幕的视频验证 |
 | encode（转码/烧录） | ✅ | ffmpeg libx264 CRF + libass 烧录 | 容器内转码实测 664K 输出正常 |
 | upload（投稿） | ✅ | 三平台上传器 | AcFun 报错「Cookie 为空」正确，需凭证真实投稿 |
 | 封面兜底抽帧 | ✅ | ffmpeg `-ss 3 -vframes 1` | 无封面时自动生成 |
+
+### 2.2.1 AI 模块明细（v1.2 新增）
+
+| 组件 | 类名 | 能力 | 对标 Python |
+| --- | --- | --- | --- |
+| AI 客户端 | `AiClient` | Chat Completions、JSON 模式、**降级协商**、超时分类、端点能力缓存 | `_request_chat_completion` |
+| 文本清洗 | `TextSanitizer` | 去导流/标题单行化/压空行；输出校验四道关 | `_pre_clean`/`_post_clean`/`_validate_output` |
+| 提示词中心 | `PromptTemplates` | builtin/append/override 三模式 + 共享规则 + JSON 契约 | `prompt_manager` |
+| 元信息翻译 | `MetadataTranslator` | 首轮 → 逐字段校验 → 分字段重试 → 回退原文 | `translate_video_metadata` |
+| 标签生成 | `TagGenerator` | 预设去重（含 10 字截断形式）+ 最多 6 个 + 单标签 10 字 | `generate_acfun_tags` |
+| 分区推荐 | `PartitionRecommender` | 本地分区树 + 模型选择 + **ID 白名单校验** + 低置信度标记 | `_recommend_partition_core` |
+
+**输出校验四道关**（任一不过即触发重试 → 仍失败则回退原文）：
+1. 空输出
+2. 含导流/社媒/互动引导信号（30+ 关键词）
+3. 与原文相似度 ≥ 0.90（Levenshtein 归一化，等价 difflib ratio）
+4. 简介非自然（列表/备注行占比 > 50%）
+
+**降级协商**（应对中转站/本地模型）：
+- `response_format=json_object` 不支持 → 缓存该端点能力，降级纯文本 + 提取 JSON
+- 思考参数不支持 → 不传
+- 429 / 5xx → 标记可重试
+
+**平台字数限额自适应**：抖音 30/1000、AcFun 50/1000、bilibili 80/2000
 
 ### 2.3 三平台上传
 
@@ -98,15 +127,16 @@
 
 | # | 项目 | 优先级 | 预估工作量 | 阻塞/依赖 |
 | --- | --- | --- | --- | --- |
-| 1 | **AI 阶段**（翻译/标签/分区推荐） | P0 | 3-4 周 | openai-java；Python 侧 ~5000 行 |
-| 2 | **ASR**（Whisper + silero-vad） | P0 | 3-4 周 | ONNX Runtime + VAD 分段算法移植 |
+| 1 | ~~AI 阶段（翻译/标签/分区）~~ | ~~P0~~ | ✅ v1.2 完成 | 6 个类 / 1,500+ 行；单测 12/12；**待 API Key 实测** |
+| 2 | **ASR**（Whisper + silero-vad） | **P0** | 3-4 周 | ONNX Runtime + VAD 分段算法移植 |
 | 3 | 真实投稿验证（三平台） | P1 | 1 周 | **需真实账号 Cookie** |
 | 4 | ~~bilibili 扫码登录~~ | ~~P2~~ | ✅ 已完成 | 纯 HTTP + ZXing，实测出码 |
-| 5 | 前端进度实时展示 | P2 | 3-5 天 | SSE 已就绪，仅缺 UI 绑定 |
-| 6 | 内容审核（阿里云 Green） | P3 | 3-5 天 | 官方 Java SDK |
-| 7 | CookieCloud 同步 | P3 | 2-3 天 | AES 解密 + Netscape 生成 |
-| 8 | 字幕质检 QC | P3 | 1 周 | 依赖 AI 阶段 |
-| 9 | 智能分段 | P3 | 1 周 | 依赖 AI + ASR |
+| 5 | **AI 真实测试**（需 API Key） | **P1** | 1 天 | 填端点后点「测试 AI 连接」即可 |
+| 6 | 前端进度实时展示 | P2 | 3-5 天 | SSE 已就绪，仅缺 UI 绑定 |
+| 7 | 内容审核（阿里云 Green） | P3 | 3-5 天 | 官方 Java SDK |
+| 8 | CookieCloud 同步 | P3 | 2-3 天 | AES 解密 + Netscape 生成 |
+| 9 | 字幕质检 QC | P3 | 1 周 | 依赖 AI（已就绪）+ 字幕链路 |
+| 10 | 智能分段 | P3 | 1 周 | 依赖 AI + ASR |
 
 ---
 
@@ -114,12 +144,15 @@
 
 | 风险 | 等级 | 现状 | 缓解 |
 | --- | --- | --- | --- |
+| **AI 未用真实密钥实测** | 高 | 逻辑单测通过，但真实模型输出格式/质量未验证 | 填写 API Key 后点「测试 AI 连接」+ 跑一次真实任务 |
 | bilibili 投稿未经真实环境验证 | 高 | 仅代码完整，WBI 参数与 body 结构可能需调整 | 需真实 Cookie 联调 |
 | 抖音 DOM 选择器易随改版失效 | 中 | 已做多组兜底 + 失败截图 | 截图目录 `storage/logs/douyin` |
+| 分区推荐依赖模型判断质量 | 中 | ID 白名单已防编造，但选得准不准需实测 | 低置信度（<0.5）会标记，人工审核页可见 |
 | Playwright 首次启动慢（20-30s） | 低 | driver 解压 + 浏览器启动 | 已加 skip 环境变量，避免联网 |
 | AcFun 长轮询占线程 | 低 | 已限 8s 读超时 | 后续可改异步轮询 |
 | 前端上传结果展示不完整 | 中 | 仅基础 badge | 需补 task_card 完整分支 |
 | 通知 outbox 未做端到端验证 | 中 | 逻辑完整 | 需配置真实 webhook 测试 |
+| 基础镜像拉取偶发失败 | 低 | registry 偶发 EOF | 已建 `Dockerfile.hotfix` 走增量更新路径 |
 
 ---
 
@@ -128,22 +161,29 @@
 ### 推荐顺序
 
 ```
-① AI 元信息阶段（P0，2 周）
-   ├─ openai-java 接入（Chat Completions + 兼容 Responses）
-   ├─ 标题/简介翻译（批量 + 重试 + 降级协商）
-   ├─ 标签生成（含预设标签合并、平台限额截断）
-   └─ 分区推荐（AcFun 映射表 / bilibili 分区树）
+✅ ① AI 元信息阶段（已完成 v1.2）
+   ├─ OpenAI 兼容客户端（Chat Completions + 降级协商）
+   ├─ 标题/简介翻译（逐字段校验 + 分字段重试 + 回退原文）
+   ├─ 标签生成（预设去重 + 平台限额截断）
+   └─ 分区推荐（AcFun 60 / bilibili 141 分区 + ID 白名单）
+   ⚠ 待办：填写 API Key 后实测真实翻译质量
 
-② ASR 阶段（P0，2-3 周）
-   ├─ Whisper HTTP 客户端（multipart + 分段）
-   ├─ VAD（ONNX Runtime + silero_vad.onnx）
+② AI 真实测试（P1，1 天）← 当前最近可做项
+   ├─ 设置页填写 Base URL / API Key / 模型
+   ├─ 点「测试 AI 连接」验证端点
+   └─ 跑一条真实任务看翻译/标签/分区产出
+
+③ ASR 阶段（P0，2-3 周）
+   ├─ Whisper HTTP 客户端（multipart + 分段 + 重试）
+   ├─ VAD（ONNX Runtime + silero_vad.onnx + 分段算法）
    └─ 字幕后处理（拆行/标点/填充词/时间轴）
 
-③ 联调验证（P1，1 周）
-   ├─ 真实 Cookie 跑通三平台投稿
-   └─ 修复协议差异
+④ 真实投稿验证（P1，1 周）
+   ├─ 三平台扫码登录（已可用）
+   ├─ 各跑一次真实投稿
+   └─ 修复协议差异（重点 bilibili WBI）
 
-④ 前端增强（P2，1 周）
+⑤ 前端增强（P2，1 周）
    ├─ 任务进度实时条
    ├─ 上传结果完整展示
    └─ 转码/AI 配置项联动
@@ -151,11 +191,11 @@
 
 ### 里程碑定义
 
-| 里程碑 | 验收标准 |
-| --- | --- |
-| **M1 内容智能化** | 一条 YouTube 链接自动产出中文标题/简介/标签/分区 |
-| **M2 字幕全链路** | 无字幕视频能通过 ASR 生成并翻译烧录 |
-| **M3 生产可用** | 三平台各成功投稿 1 次，前端可完整操作 |
+| 里程碑 | 验收标准 | 状态 |
+| --- | --- | --- |
+| **M1 内容智能化** | 一条 YouTube 链接自动产出中文标题/简介/标签/分区 | 🟡 代码完成，待 API Key 实测 |
+| **M2 字幕全链路** | 无字幕视频能通过 ASR 生成并翻译烧录 | ⬜ 待 ASR |
+| **M3 生产可用** | 三平台各成功投稿 1 次，前端可完整操作 | ⬜ 待联调 |
 
 ---
 
@@ -165,6 +205,7 @@
 | --- | --- | --- |
 | 2026-11-22 | v1.0 | 基线报告：Phase 0-3 完成（骨架/CRUD/流水线/三平台上传/扫码） |
 | 2026-11-22 | v1.1 | **补齐 bilibili 扫码登录**：新增 `BilibiliQrLoginService`（纯 HTTP 协议 + ZXing 二维码渲染），三平台扫码覆盖率达 3/3。新增 ZXing 3.5.3 依赖。实测出码 15812 字符 base64 PNG，三态码轮询正常。影响：2.4 节扫码表、未完成清单移除第 4 项 |
+| 2026-11-23 | v1.2 | **AI 阶段完成**：新增 `ai` 包 6 个类（AiClient / TextSanitizer / PromptTemplates / MetadataTranslator / TagGenerator / PartitionRecommender）。提示词 1:1 搬运原版（翻译/标签/分区），输出校验四道关（空/导流/过于相似/非自然简介），JSON 模式带降级协商。内置 AcFun 60 + bilibili 141 分区数据。接入 `TaskOrchestrator` 流水线（下载后 → 翻译 → 标签 → 分区 → 转码前）。新增 `/api/ai/{status,test,preview-tags}` 端点 + 设置页「测试 AI 连接」按钮。单测 12/12 通过。代码规模 68→76 文件、6,546→8,358 行、51→54 端点。**待办：需 API Key 实测真实质量** |
 
 <!-- 后续迭代在此追加，格式：
 | YYYY-MM-DD | vX.Y | 完成了什么；影响了哪些表格；下一步变化 |

@@ -210,6 +210,14 @@ com.y2a.server
 │   ├── DouyinPublisher           Playwright 发布
 │   └── bili/{BilibiliUploader, WbiSigner}
 │
+├── ai/                                    AI 能力（Phase 4-AI，已实现）
+│   ├── AiClient                  OpenAI 兼容客户端（JSON模式/降级协商/超时分类）
+│   ├── TextSanitizer             输入清洗 + 输出校验四道关
+│   ├── PromptTemplates           提示词中心（builtin/append/override）
+│   ├── MetadataTranslator        标题/简介翻译（校验 + 分字段重试 + 回退）
+│   ├── TagGenerator              标签生成（预设去重 + 平台限额）
+│   └── PartitionRecommender      分区推荐（本地分区树 + ID白名单）
+│
 ├── tools/                                 外部系统封装
 │   ├── ProcessRunner            进程执行（流式/超时/取消）
 │   ├── ToolPaths                路径配置 + 可用性探测
@@ -217,7 +225,7 @@ com.y2a.server
 │   ├── FfmpegService            ffprobe/转码/烧录/抽帧
 │   └── PlatformHttpClient       Cookie解析/表单/JSON/二进制/multipart
 │
-└── engine/                                引擎集成（Phase 4 预留）
+└── engine/                                引擎集成（Phase 4-ASR 预留）
     ├── EngineClient             提交阶段任务 + 健康探测
     └── dto/{EngineTaskRequest, EngineCallback}
 ```
@@ -419,6 +427,37 @@ normalizers.put("UPLOAD_TARGET_DEFAULT", v -> UploadTarget.fromValue(str(v)).val
 - 超时/取消 → `destroyForcibly()` + 5s 等待
 - 内存保护：每流最多保留 2000 行
 
+### 6.7 AI 调用与降级协商
+
+```
+调用方（MetadataTranslator / TagGenerator / PartitionRecommender）
+        │
+        ├─ chatJson(prompt, payload, temperature)
+        ▼
+   AiClient ──► 查端点能力缓存（baseUrl|model）
+        │           ├─ 支持 JSON 模式 → response_format=json_object
+        │           └─ 已知不支持   → 纯文本 + 提取 JSON
+        │
+        ├─ POST /chat/completions
+        │       ├─ 200 + finish_reason=stop → 解析 choices[0].message.content
+        │       ├─ 400 含 "response_format" → 缓存不支持，降级重试一次
+        │       ├─ 429 / 5xx                → 抛可重试异常
+        │       └─ finish_reason≠stop       → 视为失败（截断/内容过滤）
+        │
+        └─ extractJson()：剥离 ``` 围栏 → 取首个 {…} 区间 → Jackson 解析
+```
+
+**能力缓存**：`jsonModeSupport` / `thinkingSupport` 两个 ConcurrentHashMap，键为 `baseUrl|model`，进程内有效。避免每次请求都撞同一个不支持的参数。
+
+**校验闭环**（在 AiClient 之外）：
+```
+模型输出 → TextSanitizer.validateOutput
+             ├─ passed  → 采纳
+             └─ failed  → 分字段重试（专用提示词）
+                            ├─ passed → 采纳
+                            └─ failed → 回退清洗后原文 + 截断
+```
+
 ---
 
 ## 7. 关键时序图
@@ -514,7 +553,109 @@ sequenceDiagram
     EP-->>SSE: 前端显示「待审核」
 ```
 
-### 7.3 上传到平台（以 AcFun 为例）
+### 7.3 AI 元信息阶段（翻译 → 标签 → 分区）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TO as TaskOrchestrator
+    participant MT as MetadataTranslator
+    participant TS as TextSanitizer
+    participant AC as AiClient
+    participant TG as TagGenerator
+    participant PR as PartitionRecommender
+    participant LLM as OpenAI 兼容端点
+    participant DB as PostgreSQL
+
+    Note over TO: 下载完成后进入 AI 阶段
+    TO->>TO: 读配置 TRANSLATE_TITLE / GENERATE_TAGS / RECOMMEND_PARTITION
+    alt 全部关闭 或 AI 未配置
+        TO->>TO: 跳过（只记日志）
+    end
+
+    rect rgb(240, 248, 255)
+    Note over TO,LLM: ① 翻译阶段（状态 TRANSLATING）
+    TO->>MT: translate(title, desc, targetLang, limits)
+    MT->>TS: preClean(title, "title") + preClean(desc, "description")
+    TS-->>MT: 清洗后文本（去导流/单行化/压空行）
+    MT->>TS: hasMeaningfulContent()
+    alt 无实质内容
+        MT-->>TO: 保留清洗后原文（跳过翻译）
+    end
+
+    MT->>AC: chatJson(翻译提示词, {title, description})
+    AC->>LLM: POST /chat/completions (response_format=json_object)
+    alt 端点不支持 response_format
+        LLM-->>AC: 400 Unsupported parameter
+        AC->>AC: 缓存该端点能力=false
+        AC->>LLM: 重试（纯文本模式）
+    end
+    LLM-->>AC: {title:"...", description:"..."}
+    AC-->>MT: JsonNode
+
+    MT->>TS: validateOutput(title, "title")
+    TS-->>MT: {passed, reasons}
+    alt 标题校验失败
+        MT->>AC: chatJson(重试提示词, {title})
+        AC->>LLM: 单独重试标题
+        LLM-->>AC: {title:"..."}
+        MT->>TS: 再次校验
+        alt 仍失败
+            MT->>MT: 回退清洗后原文 + 截断
+        end
+    end
+
+    MT->>TS: validateOutput(desc, "description")
+    alt 简介校验失败（如列表式）
+        MT->>AC: chatJson(简介重试提示词, {description})
+        AC->>LLM: 专用重试
+    end
+    MT-->>TO: Result{title, desc, titleTranslated, descTranslated, warnings}
+    TO->>DB: UPDATE video_title_translated / description_translated
+    end
+
+    rect rgb(245, 255, 245)
+    Note over TO,LLM: ② 标签阶段（状态 TAGGING）
+    TO->>TO: 读 PRESET_TAGS（预设标签）
+    TO->>TG: generate(title, desc, avoidTags)
+    TG->>TS: preClean + hasMeaningfulContent
+    TG->>AC: chatJson(标签提示词 + 预设禁用清单)
+    AC->>LLM: POST (temperature=0.2)
+    LLM-->>AC: {tags:["","",...]}
+    AC-->>TG: JsonNode
+    TG->>TG: 去重 + 排除预设 + 单标签截断10字 + 最多6个
+    TG-->>TO: List<String>
+    TO->>DB: UPDATE tags_generated (预设优先 + AI 补齐)
+    end
+
+    rect rgb(255, 250, 240)
+    Note over TO,LLM: ③ 分区阶段（状态 PARTITIONING）
+    loop 每个目标平台（acfun / bilibili）
+        TO->>PR: recommend(platform, title, desc, tags)
+        PR->>PR: 从 resources/partitions/*.json 加载候选
+        PR->>AC: chatJson(分区选择提示词, {metadata, candidates})
+        AC->>LLM: POST (temperature=0.0)
+        LLM-->>AC: {acfun:{id,confidence,alternatives,reason}}
+        PR->>PR: ID 白名单校验（防编造）
+        alt ID 非法
+            PR->>PR: 置空并标记 low_confidence
+        end
+        PR-->>TO: Selection{id, name, confidence, alternatives}
+        TO->>DB: UPDATE recommended_partition_id_{platform}
+    end
+    end
+
+    TO->>TO: 进入转码 / 待审核阶段
+```
+
+**关键设计点**：
+- **三阶段独立容错**：翻译/标签/分区各自 try-catch，任一失败不阻塞主流程
+- **校验驱动重试**：不是简单重试，而是按「哪个字段不过关」精准重试该字段
+- **降级协商缓存**：端点能力（是否支持 JSON 模式）按 `baseUrl|model` 缓存，避免每次都撞墙
+- **分区 ID 白名单**：模型只能从候选里选，编造的 ID 会被丢弃并降级为低置信度
+- **字数限额自适应**：抖音 30/1000、AcFun 50/1000、bilibili 80/2000
+
+### 7.4 上传到平台（以 AcFun 为例）
 
 ```mermaid
 sequenceDiagram
@@ -588,7 +729,7 @@ sequenceDiagram
     TO->>TO: published("task_completed")
 ```
 
-### 7.4 抖音扫码登录
+### 7.5 抖音扫码登录
 
 ```mermaid
 sequenceDiagram
@@ -641,7 +782,7 @@ sequenceDiagram
     QC-->>B: {status:"done", cookies_saved:true}
 ```
 
-### 7.5 AcFun 扫码登录（长轮询）
+### 7.6 AcFun 扫码登录（长轮询）
 
 ```mermaid
 sequenceDiagram
@@ -692,7 +833,7 @@ sequenceDiagram
     QC-->>B: {status:"done", cookies_saved:true}
 ```
 
-### 7.6 bilibili 扫码登录（三态码）
+### 7.7 bilibili 扫码登录（三态码）
 
 ```mermaid
 sequenceDiagram
@@ -751,7 +892,7 @@ sequenceDiagram
 - **凭证双来源合并**：成功时 URL query 与 Set-Cookie 都可能有 Cookie，取并集并保证必需键齐全
 - **键序固定**：写入 JSON 时按 `SESSDATA, bili_jct, DedeUserID, buvid3, buvid4, _uuid, ac_time_value` 排序，与 Python 版一致，便于上传器读取
 
-### 7.7 SSE 任务进度推送与降级
+### 7.8 SSE 任务进度推送与降级
 
 ```mermaid
 sequenceDiagram
@@ -786,7 +927,7 @@ sequenceDiagram
     end
 ```
 
-### 7.8 通知 outbox 异步投递
+### 7.9 通知 outbox 异步投递
 
 ```mermaid
 sequenceDiagram
@@ -846,16 +987,16 @@ sequenceDiagram
 | bilibili 扫码 | `passport.bilibili.com/x/passport-login/web/qrcode/*` | 无（返回 Cookie） | ✅ 实测出码 |
 | 抖音 | `creator.douyin.com`（Playwright） | storage_state | ✅ 扫码实测 |
 | YouTube | yt-dlp 内置 extractor | Cookie（可选） | ✅ 实测 |
+| OpenAI 兼容 API | 翻译 / 标签 / 分区推荐 | Bearer Token | ✅ 已实现（待密钥实测） |
 
 ### 8.3 待接入
 
 | 服务 | 用途 | 计划 |
 | --- | --- | --- |
-| OpenAI 兼容 API | 翻译 / 标签 / 分区 / 字幕质检 | Phase 4（openai-java） |
-| Whisper / Voxtral | ASR | Phase 4 |
-| 阿里云 Green | 内容审核 | Phase 5 |
+| Whisper / Voxtral | ASR（语音转字幕） | Phase 4-ASR |
+| 阿里云 Green | 内容审核（文本+封面） | Phase 5 |
 | 阿里云 OSS | 存储（可选） | Phase 5 |
-| CookieCloud | Cookie 同步 | Phase 5 |
+| CookieCloud | Cookie 自动同步 | Phase 5 |
 
 ---
 

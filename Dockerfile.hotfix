@@ -1,0 +1,4 @@
+# 热更新镜像：基于已构建好的 y2a-java-server:latest 只替换 jar
+# 用途：基础镜像拉取不稳定时的增量更新路径
+FROM y2a-java-server:latest
+COPY y2a-server/target/y2a-server-0.1.0-SNAPSHOT.jar app.jar

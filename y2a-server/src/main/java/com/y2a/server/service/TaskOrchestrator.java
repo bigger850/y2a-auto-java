@@ -1,6 +1,7 @@
 package com.y2a.server.service;
 
 import com.y2a.server.common.constant.TaskStatus;
+import com.y2a.server.common.constant.UploadTarget;
 import com.y2a.server.domain.task.Task;
 import com.y2a.server.event.TaskEventPublisher;
 import com.y2a.server.repository.TaskRepository;
@@ -15,6 +16,8 @@ import org.springframework.stereotype.Service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -42,6 +45,10 @@ public class TaskOrchestrator {
     private final FfmpegService ffmpeg;
     private final CookieService cookieService;
     private final com.y2a.server.uploader.UploadDispatcher uploadDispatcher;
+    private final com.y2a.server.ai.AiClient aiClient;
+    private final com.y2a.server.ai.MetadataTranslator metadataTranslator;
+    private final com.y2a.server.ai.TagGenerator tagGenerator;
+    private final com.y2a.server.ai.PartitionRecommender partitionRecommender;
 
     @Value("${app.storage.cookies:./storage/cookies}")
     private String cookiesDir;
@@ -52,7 +59,11 @@ public class TaskOrchestrator {
     public TaskOrchestrator(TaskService taskService, TaskRepository taskRepository,
                             TaskEventPublisher eventPublisher, YtDlpClient ytDlp,
                             FfmpegService ffmpeg, CookieService cookieService,
-                            com.y2a.server.uploader.UploadDispatcher uploadDispatcher) {
+                            com.y2a.server.uploader.UploadDispatcher uploadDispatcher,
+                            com.y2a.server.ai.AiClient aiClient,
+                            com.y2a.server.ai.MetadataTranslator metadataTranslator,
+                            com.y2a.server.ai.TagGenerator tagGenerator,
+                            com.y2a.server.ai.PartitionRecommender partitionRecommender) {
         this.taskService = taskService;
         this.taskRepository = taskRepository;
         this.eventPublisher = eventPublisher;
@@ -60,6 +71,10 @@ public class TaskOrchestrator {
         this.ffmpeg = ffmpeg;
         this.cookieService = cookieService;
         this.uploadDispatcher = uploadDispatcher;
+        this.aiClient = aiClient;
+        this.metadataTranslator = metadataTranslator;
+        this.tagGenerator = tagGenerator;
+        this.partitionRecommender = partitionRecommender;
     }
 
     public AtomicBoolean cancelFlag(String taskId) {
@@ -109,19 +124,166 @@ public class TaskOrchestrator {
             task = taskService.get(taskId);
         }
 
-        // 4) 转码/烧录（可选，由配置决定）
+        // 4) AI 元信息（翻译 / 标签 / 分区）
+        runAiStage(taskId);
+
+        // 5) 转码/烧录（可选，由配置决定）
         Task finalTask = taskService.get(taskId);
         if (shouldEncode(finalTask)) {
             encode(taskId);
         }
 
-        // 5) 准备上传
+        // 6) 准备上传
         Task afterEncode = taskService.get(taskId);
         if (afterEncode.statusEnum() == TaskStatus.DOWNLOADED
                 || afterEncode.statusEnum() == TaskStatus.ENCODING_VIDEO) {
             taskService.changeStatusTo(taskId, TaskStatus.AWAITING_REVIEW);
             log.info("任务 {} 处理完成，进入人工审核", taskId);
         }
+    }
+
+    /**
+     * AI 阶段：翻译标题/简介 → 生成标签 → 推荐分区。
+     * 任何一步失败都不阻塞主流程，只记录警告。
+     */
+    private void runAiStage(String taskId) {
+        Task task = taskService.get(taskId);
+        boolean needTranslate = configBool("TRANSLATE_TITLE", false)
+                || configBool("TRANSLATE_DESCRIPTION", false);
+        boolean needTags = configBool("GENERATE_TAGS", false);
+        boolean needPartition = configBool("RECOMMEND_PARTITION", false);
+
+        if (!needTranslate && !needTags && !needPartition) {
+            return;
+        }
+        if (!aiClient.globalConfig().usable()) {
+            log(taskId, "AI 未配置，跳过 AI 阶段");
+            return;
+        }
+
+        // ---- 翻译 ----
+        if (needTranslate) {
+            taskService.changeStatusTo(taskId, TaskStatus.TRANSLATING);
+            log(taskId, "开始 AI 翻译标题与简介");
+            var limits = metadataLimits(task);
+            String targetLang = configStr("SUBTITLE_TARGET_LANGUAGE", "zh");
+            try {
+                var result = metadataTranslator.translate(
+                        task.getVideoTitleOriginal(),
+                        task.getDescriptionOriginal(),
+                        targetLang,
+                        limits.titleLimit(), limits.descLimit(),
+                        configBool("TRANSLATE_TITLE", false),
+                        configBool("TRANSLATE_DESCRIPTION", false));
+                Task fresh = taskService.get(taskId);
+                if (result.titleTranslated()) fresh.setVideoTitleTranslated(result.title());
+                if (result.descriptionTranslated()) fresh.setDescriptionTranslated(result.description());
+                taskRepository.updateById(fresh);
+                for (String w : result.warnings()) log(taskId, "翻译提示: " + w);
+                log(taskId, "翻译完成 title=" + result.titleTranslated()
+                        + " desc=" + result.descriptionTranslated());
+            } catch (Exception e) {
+                log(taskId, "翻译失败（继续）: " + e.getMessage());
+            }
+            task = taskService.get(taskId);
+        }
+
+        // ---- 标签 ----
+        if (needTags) {
+            taskService.changeStatusTo(taskId, TaskStatus.TAGGING);
+            log(taskId, "开始生成标签");
+            try {
+                List<String> avoid = presetTags();
+                var tags = tagGenerator.generate(
+                        task.getVideoTitleTranslated() != null
+                                ? task.getVideoTitleTranslated() : task.getVideoTitleOriginal(),
+                        task.getDescriptionTranslated() != null
+                                ? task.getDescriptionTranslated() : task.getDescriptionOriginal(),
+                        avoid, taskId);
+                if (!tags.isEmpty()) {
+                    Task fresh = taskService.get(taskId);
+                    // 预设标签优先，AI 标签补齐
+                    List<String> merged = new ArrayList<>(avoid);
+                    for (String t : tags) {
+                        if (merged.stream().noneMatch(x -> x.equalsIgnoreCase(t))) merged.add(t);
+                    }
+                    fresh.setTagsGenerated(merged);
+                    taskRepository.updateById(fresh);
+                    log(taskId, "标签已写入: " + merged);
+                }
+            } catch (Exception e) {
+                log(taskId, "标签生成失败（继续）: " + e.getMessage());
+            }
+            task = taskService.get(taskId);
+        }
+
+        // ---- 分区 ----
+        if (needPartition) {
+            taskService.changeStatusTo(taskId, TaskStatus.PARTITIONING);
+            log(taskId, "开始推荐分区");
+            try {
+                UploadTarget target = task.targetEnum();
+                List<String> platforms = target.platforms().stream()
+                        .map(UploadTarget::value).toList();
+                String title = task.getVideoTitleTranslated() != null
+                        ? task.getVideoTitleTranslated() : task.getVideoTitleOriginal();
+                String desc = task.getDescriptionTranslated() != null
+                        ? task.getDescriptionTranslated() : task.getDescriptionOriginal();
+
+                for (String platform : platforms) {
+                    var sel = partitionRecommender.recommend(platform, title, desc,
+                            task.getTagsGenerated());
+                    if (!sel.found()) {
+                        log(taskId, platform + " 分区推荐未命中: " + sel.reason());
+                        continue;
+                    }
+                    Task fresh = taskService.get(taskId);
+                    if ("acfun".equals(platform)) {
+                        fresh.setRecommendedPartitionIdAcfun(sel.id());
+                        if (fresh.getSelectedPartitionIdAcfun() == null) {
+                            fresh.setSelectedPartitionIdAcfun(sel.id());
+                        }
+                    } else if ("bilibili".equals(platform)) {
+                        fresh.setRecommendedPartitionIdBilibili(sel.id());
+                        if (fresh.getSelectedPartitionIdBilibili() == null) {
+                            fresh.setSelectedPartitionIdBilibili(sel.id());
+                        }
+                    }
+                    taskRepository.updateById(fresh);
+                    log(taskId, String.format("%s 分区推荐: %s(%s) confidence=%.2f",
+                            platform, sel.name(), sel.id(), sel.confidence()));
+                }
+            } catch (Exception e) {
+                log(taskId, "分区推荐失败（继续）: " + e.getMessage());
+            }
+        }
+    }
+
+    /** 按目标平台取元信息字数上限。 */
+    private record MetadataLimits(int titleLimit, int descLimit) {
+    }
+
+    private MetadataLimits metadataLimits(Task task) {
+        return switch (task.targetEnum()) {
+            case BILIBILI -> new MetadataLimits(80, 2000);
+            case DOUYIN -> new MetadataLimits(30, 1000);
+            default -> new MetadataLimits(50, 1000);
+        };
+    }
+
+    /** 读取预设标签（换行/逗号/顿号/分号分隔）。 */
+    private List<String> presetTags() {
+        if (!configBool("PRESET_TAGS_ENABLED", false)) return List.of();
+        String raw = configStr("PRESET_TAGS", "");
+        List<String> result = new ArrayList<>();
+        for (String part : raw.split("[\\n\\r,，、;；]+")) {
+            String tag = part.trim();
+            if (!tag.isEmpty() && result.stream().noneMatch(t -> t.equalsIgnoreCase(tag))) {
+                result.add(tag);
+            }
+            if (result.size() >= 12) break;
+        }
+        return result;
     }
 
     /** 异步执行上传阶段（供「强制上传」与 AUTO_MODE 调用）。 */

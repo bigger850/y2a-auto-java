@@ -321,6 +321,25 @@ async function testChannel(channel: string) {
   setTimeout(() => (toast.value = ''), 4500)
 }
 
+// ---------------- AI 连通性测试 ----------------
+const aiTesting = ref(false)
+const aiTestResult = ref('')
+
+async function testAi() {
+  aiTesting.value = true
+  aiTestResult.value = ''
+  try {
+    const r = await request<{ ok: boolean; elapsedMs: number; model: string; reply: string }>({
+      method: 'POST', url: '/ai/test',
+    })
+    aiTestResult.value = `✓ 连接正常（${r.elapsedMs}ms，模型 ${r.model}）：${r.reply || '正常'}`
+  } catch (e: any) {
+    aiTestResult.value = `✗ ${e?.message || '连接失败'}`
+  } finally {
+    aiTesting.value = false
+  }
+}
+
 const filteredTabs = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
   if (!q) return TABS
@@ -421,6 +440,23 @@ const filteredTabs = computed(() => {
                       </article>
                     </div>
                   </div>
+                </section>
+
+                <!-- AI 服务：连通性测试 -->
+                <section v-if="t.id === 'vtab-ai'" class="settings-section">
+                  <div class="settings-section-header"><h3 class="mb-1">连接测试</h3>
+                    <p class="section-lead">保存配置后，可发送一个最小请求验证端点与密钥是否可用。</p></div>
+                  <div class="row g-4 settings-pane-grid"><div class="col-12"><article class="settings-card"><div class="settings-card-body">
+                    <div class="d-flex flex-wrap gap-2 align-items-center">
+                      <button type="button" class="btn btn-outline-primary" :disabled="aiTesting" @click="testAi">
+                        <i class="bi bi-lightning-charge"></i> {{ aiTesting ? '测试中...' : '测试 AI 连接' }}
+                      </button>
+                      <span class="help-text">使用「全局模型」中的配置发起一次对话请求。</span>
+                    </div>
+                    <div v-if="aiTestResult" class="mt-2">
+                      <span :class="aiTestResult.startsWith('✓') ? 'text-success' : 'text-danger'">{{ aiTestResult }}</span>
+                    </div>
+                  </div></article></div></div>
                 </section>
 
                 <!-- 消息推送：渠道测试 -->

@@ -19,6 +19,7 @@ services:
 
   server:
     build: .
+    image: y2a-java-server:latest
     container_name: y2a-java
     depends_on:
       postgres:

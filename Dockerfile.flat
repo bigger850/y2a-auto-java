@@ -1,0 +1,19 @@
+# 基于压平的镜像补回运行时配置。
+# y2a-java-server:flat 由 docker export/import 得到，丢掉了 ENV/WORKDIR/ENTRYPOINT。
+FROM y2a-java-server:flat
+
+ENV JAVA_HOME=/opt/java/openjdk \
+    PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 \
+    Y2A_YTDLP_PATH=/usr/local/bin/yt-dlp \
+    Y2A_FFMPEG_PATH=/usr/bin/ffmpeg \
+    Y2A_FFPROBE_PATH=/usr/bin/ffprobe \
+    PYTHONIOENCODING=utf-8 \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+EXPOSE 8080
+USER y2a
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

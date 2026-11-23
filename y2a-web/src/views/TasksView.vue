@@ -2,6 +2,7 @@
 // 1:1 复刻原版 tasks.html（含 partials/task_row.html 与 task_card.html）
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { taskApi } from '@/api/task'
+import { request } from '@/api'
 import type { Task, TaskPage } from '@/types/task'
 
 const tasks = ref<Task[]>([])
@@ -105,9 +106,23 @@ function updateDateTimes() {
   })
 }
 
-function initSse() {
+let sseRetryTimer: number | undefined
+let sseRetryCount = 0
+
+/**
+ * 建立 SSE 连接。
+ *
+ * 浏览器的 EventSource 无法携带 Authorization 头，因此先向受保护的
+ * /api/tasks/stream-ticket 取一次性票据，再用 ?ticket=xxx 建立长连接。
+ * 断连后按指数退避重连（最多 5 次），期间由轮询兜底。
+ */
+async function initSse() {
   try {
-    es = new EventSource('/api/tasks/stream', { withCredentials: true } as EventSourceInit)
+    const { ticket } = await request<{ ticket: string }>({
+      method: 'POST', url: '/tasks/stream-ticket',
+    })
+    es = new EventSource(`/api/tasks/stream?ticket=${encodeURIComponent(ticket)}`)
+    es.onopen = () => { sseRetryCount = 0 }
     es.onmessage = (e) => {
       try {
         const evt = JSON.parse(e.data)
@@ -115,8 +130,23 @@ function initSse() {
         load(true)
       } catch { /* ignore */ }
     }
-    es.onerror = () => { es?.close(); es = null }
-  } catch { /* fallback polling still active */ }
+    es.onerror = () => {
+      es?.close()
+      es = null
+      if (sseRetryCount >= 5) return   // 放弃 SSE，交给轮询
+      sseRetryCount++
+      const delay = 1000 * Math.pow(1.5, sseRetryCount - 1)
+      clearTimeout(sseRetryTimer)
+      sseRetryTimer = window.setTimeout(() => { initSse() }, delay)
+    }
+  } catch {
+    // 取票失败（未登录/网络问题）：保持轮询兜底，稍后重试一次
+    if (sseRetryCount < 3) {
+      sseRetryCount++
+      clearTimeout(sseRetryTimer)
+      sseRetryTimer = window.setTimeout(() => { initSse() }, 3000 * sseRetryCount)
+    }
+  }
 }
 
 // 动作
@@ -172,7 +202,11 @@ onMounted(async () => {
   initSse()
   scheduleNext()
 })
-onUnmounted(() => { es?.close(); clearTimeout(refreshTimer) })
+onUnmounted(() => {
+  es?.close()
+  clearTimeout(refreshTimer)
+  clearTimeout(sseRetryTimer)
+})
 </script>
 
 <template>

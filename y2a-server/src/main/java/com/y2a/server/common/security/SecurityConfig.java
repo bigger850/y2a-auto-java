@@ -40,6 +40,8 @@ public class SecurityConfig {
                             "/api/internal/engine/callback",
                             // 二维码图片：<img src> 无法带 JWT，改用一次性 ticket 自校验
                             "/api/settings/*/qrcode/image/**",
+                            // SSE 事件流：EventSource 无法带 JWT，改用一次性 ticket 自校验
+                            "/api/tasks/stream",
                             "/actuator/**",
                             "/swagger-ui/**", "/v3/api-docs/**"
                     ).permitAll()
